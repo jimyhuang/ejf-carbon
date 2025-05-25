@@ -4,7 +4,7 @@ const path = require('path');
 const csv = require('csv-parser');
 const csvWriter = require('csv-writer');
 
-async function processCarbonData(filePath, company, year) {
+async function processCarbonData(filePath, companyName, companyId, stockId, stockName, year) {
     return new Promise((resolve, reject) => {
         const carbonData = [];
         const carbonRows = [];
@@ -20,7 +20,10 @@ async function processCarbonData(filePath, company, year) {
                     rowText.includes('(範疇三)')) {
                     
                     const newRow = {
-                        company: company,
+                        companyName: companyName,
+                        companyId: companyId,
+                        stockId: stockId,
+                        stockName: stockName,
                         year: year,
                         column1: rowArray[0] || '',
                         column2: rowArray[1] || '',
@@ -43,14 +46,14 @@ async function processCarbonData(filePath, company, year) {
     });
 }
 
-async function saveCarbonData(carbonRows, company) {
+async function saveCarbonData(carbonRows) {
     const carbonFilePath = path.join(process.cwd(), 'download', `all-carbon.csv`);
     const fileExists = fs.existsSync(carbonFilePath);
     
     const writer = csvWriter.createObjectCsvWriter({
         path: carbonFilePath,
         header: [
-            { id: 'companyName', title: '公司' },
+            { id: 'companyName', title: '公司名稱' },
             { id: 'companyId', title: '統一編號' },
             { id: 'stockId', title: '股票代號' },
             { id: 'stockName', title: '股票名稱' },
@@ -73,6 +76,53 @@ async function saveCarbonData(carbonRows, company) {
     console.log(`新增了 ${carbonRows.length} 筆範疇資料`);
 }
 
+async function findCompanyInfo(companyName) {
+    return new Promise((resolve, reject) => {
+        const filePath = path.join(process.cwd(), 'download', 'all-carbon.csv');
+
+        // 檢查檔案是否存在
+        if (!fs.existsSync(filePath)) {
+            reject(new Error('all-carbon.csv 檔案不存在'));
+            return;
+        }
+
+        let found = false;
+
+        fs.createReadStream(filePath, { encoding: 'utf8' })
+            .pipe(csv({
+                mapHeaders: ({ header, index }) => {
+                    const mapping = {
+                        0: 'companyName',
+                        1: 'companyId',
+                        2: 'stockId',
+                        3: 'stockName'
+                    };
+                    return mapping[index] || header;
+                }
+            }))
+            .on('data', (row) => {
+                if (row.companyName === companyName) {
+                    const rowValues = Object.values(row);
+                    const result = {
+                        companyId: row.companyId || '',
+                        stockId: row.stockId || '',
+                        stockName: row.stockName || ''
+                    };
+                    found = true;
+                    resolve(result);
+                }
+            })
+            .on('end', () => {
+                if (!found) {
+                    resolve(null); // 沒找到匹配的公司名稱
+                }
+            })
+            .on('error', (error) => {
+                reject(error);
+            });
+    });
+}
+
 async function automateESGSearch(companyQuery, year) {
     const browser = await chromium.launch({ headless: false });
     const context = await browser.newContext();
@@ -80,14 +130,33 @@ async function automateESGSearch(companyQuery, year) {
     let companyId = '',
       stockId = '',
       stockName = '';
+    const result = await findCompanyInfo(companyQuery);
+    if (result) {
+      if (typeof result.companyId !== 'undefined') companyId = result.companyId;
+      if (typeof result.stockId !== 'undefined') stockId = result.stockId;
+      if (typeof result.stockName !== 'undefined') stockName = result.stockName;
+    }
+
     // Setting default timeouts. Consider increasing these if network is slow or pages are complex.
-    page.setDefaultTimeout(5000);
-    page.setDefaultNavigationTimeout(5000);
+    page.setDefaultTimeout(15000);
+    page.setDefaultNavigationTimeout(15000);
 
     if (!stockId) {
       try {
         console.log(`開始查詢 ${companyQuery} 的公司基本資料...`);
-        await page.goto('https://company.g0v.ronny.tw/index/search?q='+)
+
+        const url = 'https://company.g0v.ronny.tw/api/search?page=1&q='+companyQuery;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const jsonData = await response.json();
+        if (jsonData.data && jsonData.data.length > 0) {
+            companyId = jsonData.data[0]["統一編號"];
+            console.log('統一編號:', companyId);
+        } else {
+            console.log('沒有找到統一編號資料');
+        }
 
         console.log(`開始查詢 ${companyQuery} 的股票代號資訊...`);
         const isinUrl = `https://isin.twse.com.tw/isin/single_main.jsp?owncode=&stockname=${encodeURIComponent(companyQuery)}`;
@@ -113,7 +182,7 @@ async function automateESGSearch(companyQuery, year) {
         stockId = (await stockIdCellLocator.textContent() || '').trim();
         stockName = (await stockNameCellLocator.textContent() || '').trim();
 
-        if (!stockIdText) {
+        if (!stockId) {
             console.warn(`警告: 從 ISIN 網站獲取的 stockId (第三欄) 為空。companyQuery: ${companyQuery}`);
             // Decide if this is a fatal error or if we should proceed with companyQuery
         }
@@ -121,16 +190,19 @@ async function automateESGSearch(companyQuery, year) {
         console.log(`從 ISIN 網站獲取到的資訊:`);
         console.log(`  - stockId (來自第三欄): ${stockId}`);
         console.log(`  - stockName (來自第四欄): ${stockName}`);
-        // Note: stockIdText (e.g., "台積電") will be used as the company identifier for ESG site.
+        // Note: stockId (e.g., "台積電") will be used as the company identifier for ESG site.
 
       } catch (error) {
           console.error('執行過程中發生錯誤:', error);
-      } finally {
-          await browser.close();
       }
     }
 
-    try {
+    const fileName = `${companyId}-${year}.csv`; // Filename uses companyId
+    const filePath = path.join(process.cwd(), 'download', fileName);
+    const fileExists = fs.existsSync(filePath);
+
+    if (!fileExists) {
+      try {
         const downloadDir = path.join(process.cwd(), 'download');
         if (!fs.existsSync(downloadDir)) {
             fs.mkdirSync(downloadDir, { recursive: true });
@@ -143,9 +215,9 @@ async function automateESGSearch(companyQuery, year) {
         await page.click('.left-box input[placeholder="公司代號/股票代號*"]');
         await page.waitForTimeout(2000);
 
-        // Using stockIdText (from 3rd column of ISIN) for the ESG site's company code field
-        await page.fill('.left-box input[placeholder="公司代號/股票代號*"]', stockIdText.toString());
-        await page.waitForSelector('.dropdown-box .option-box .option-item', { timeout: 5000 });
+        // Using stockId (from 3rd column of ISIN) for the ESG site's company code field
+        await page.fill('.left-box input[placeholder="公司代號/股票代號*"]', stockId.toString());
+        await page.waitForSelector('.dropdown-box .option-box .option-item', { timeout: 7000 });
         await page.click('.dropdown-box .option-box .option-item:first-child');
 
         await page.click('.left-box input[placeholder="報告年度*"]');
@@ -153,7 +225,7 @@ async function automateESGSearch(companyQuery, year) {
         
         await page.fill('.left-box input[placeholder="報告年度*"]', year.toString());
         
-        await page.waitForSelector('.dropdown-box .option-box .option-item', { timeout: 5000 });
+        await page.waitForSelector('.dropdown-box .option-box .option-item', { timeout: 7000 });
         await page.click('.dropdown-box .option-box .option-item:first-child');
 
         await page.click('.left-box button.default');
@@ -167,37 +239,37 @@ async function automateESGSearch(companyQuery, year) {
         
         const download = await downloadPromise;
         
-        const fileName = `${stockIdText}-${year}.csv`; // Filename uses stockIdText
         const downloadPath = path.join(process.cwd(), 'download', fileName);
         
         await download.saveAs(downloadPath);
         
         console.log(`檔案已成功下載並儲存至: ${downloadPath}`);
         
-        console.log('開始處理碳排放資料...');
-        const carbonRows = await processCarbonData(downloadPath, companyQuery, companyId, stockIdText, stockNameText, year); // Pass stockIdText as company
-        
-        if (carbonRows.length > 0) {
-            await saveCarbonData(carbonRows, stockIdText); // Pass stockIdText as company
-        } else {
-            console.log('未找到範疇相關資料');
-        }
-        
-        console.log('自動化流程完成！');
-        
-    } catch (error) {
-        console.error('執行過程中發生錯誤:', error);
-    } finally {
-        await browser.close();
+      } catch (error) {
+          console.error('執行過程中發生錯誤:', error);
+      }
     }
+
+    console.log('開始處理碳排放資料...');
+    const carbonRows = await processCarbonData(filePath, companyQuery, companyId, stockId, stockName, year);
+        
+    if (carbonRows.length > 0) {
+      await saveCarbonData(carbonRows);
+    } else {
+      console.log('未找到範疇相關資料');
+    }
+        
+    await browser.close();
+    console.log('自動化流程完成！');
+        
 }
 
 async function main() {
     const args = process.argv.slice(2);
     
     if (args.length < 2) { // companyQuery can be company name or code for ISIN search
-        console.log('使用方式: node grab.js <公司全名> <年度>');
-        console.log('範例 (使用公司名稱): node grab.js 台灣積體電路製造股份有限公司 2023');
+        console.log('使用方式: node grab.js "<公司全名>" <年度>');
+        console.log('範例 (使用公司名稱): node grab.js "台灣積體電路製造股份有限公司" 2023');
         process.exit(1);
     }
     
@@ -209,4 +281,4 @@ async function main() {
 
 main().catch(console.error);
 
-module.exports = { automateESGSearch, processCarbonData, saveCarbonData };
+module.exports = { automateESGSearch, processCarbonData, saveCarbonData, findCompanyInfo };
