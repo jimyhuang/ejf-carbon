@@ -50,7 +50,10 @@ async function saveCarbonData(carbonRows, company) {
     const writer = csvWriter.createObjectCsvWriter({
         path: carbonFilePath,
         header: [
-            { id: 'company', title: '公司' },
+            { id: 'companyName', title: '公司' },
+            { id: 'companyId', title: '統一編號' },
+            { id: 'stockId', title: '股票代號' },
+            { id: 'stockName', title: '股票名稱' },
             { id: 'year', title: '年度' },
             { id: 'column1', title: '類型' },
             { id: 'column2', title: '議題' },
@@ -70,12 +73,62 @@ async function saveCarbonData(carbonRows, company) {
     console.log(`新增了 ${carbonRows.length} 筆範疇資料`);
 }
 
-async function automateESGSearch(company, year) {
+async function automateESGSearch(companyQuery, year) {
     const browser = await chromium.launch({ headless: false });
     const context = await browser.newContext();
     const page = await context.newPage();
+    let companyId = '',
+      stockId = '',
+      stockName = '';
+    // Setting default timeouts. Consider increasing these if network is slow or pages are complex.
     page.setDefaultTimeout(5000);
     page.setDefaultNavigationTimeout(5000);
+
+    if (!stockId) {
+      try {
+        console.log(`開始查詢 ${companyQuery} 的公司基本資料...`);
+        await page.goto('https://company.g0v.ronny.tw/index/search?q='+)
+
+        console.log(`開始查詢 ${companyQuery} 的股票代號資訊...`);
+        const isinUrl = `https://isin.twse.com.tw/isin/single_main.jsp?owncode=&stockname=${encodeURIComponent(companyQuery)}`;
+        await page.goto(isinUrl);
+        await page.waitForLoadState('networkidle');
+
+        const noDataLocator = page.locator("td.h1:has-text('查無資料!')");
+        if (await noDataLocator.count() > 0 && await noDataLocator.isVisible()) {
+            throw new Error(`在 ISIN 網站上找不到關於 "${companyQuery}" 的資料。`);
+        }
+
+        const tableLocator = page.locator('table.h4');
+        await tableLocator.waitFor({ state: 'visible', timeout: 10000 }); // Wait for table
+
+        // Get the second row of the table (first data row)
+        const dataRowLocator = tableLocator.locator('tr').nth(1);
+        await dataRowLocator.waitFor({ state: 'attached', timeout: 5000 });
+
+        // Extract stockId from the 3rd column and stockName from the 4th column as per request
+        const stockIdCellLocator = dataRowLocator.locator('td').nth(2); // 3rd column
+        const stockNameCellLocator = dataRowLocator.locator('td').nth(3); // 4th column
+
+        stockId = (await stockIdCellLocator.textContent() || '').trim();
+        stockName = (await stockNameCellLocator.textContent() || '').trim();
+
+        if (!stockIdText) {
+            console.warn(`警告: 從 ISIN 網站獲取的 stockId (第三欄) 為空。companyQuery: ${companyQuery}`);
+            // Decide if this is a fatal error or if we should proceed with companyQuery
+        }
+
+        console.log(`從 ISIN 網站獲取到的資訊:`);
+        console.log(`  - stockId (來自第三欄): ${stockId}`);
+        console.log(`  - stockName (來自第四欄): ${stockName}`);
+        // Note: stockIdText (e.g., "台積電") will be used as the company identifier for ESG site.
+
+      } catch (error) {
+          console.error('執行過程中發生錯誤:', error);
+      } finally {
+          await browser.close();
+      }
+    }
 
     try {
         const downloadDir = path.join(process.cwd(), 'download');
@@ -89,10 +142,10 @@ async function automateESGSearch(company, year) {
 
         await page.click('.left-box input[placeholder="公司代號/股票代號*"]');
         await page.waitForTimeout(2000);
-        
-        await page.fill('.left-box input[placeholder="公司代號/股票代號*"]', company.toString());
-        
-        await page.waitForSelector('.dropdown-box .option-box .option-item');
+
+        // Using stockIdText (from 3rd column of ISIN) for the ESG site's company code field
+        await page.fill('.left-box input[placeholder="公司代號/股票代號*"]', stockIdText.toString());
+        await page.waitForSelector('.dropdown-box .option-box .option-item', { timeout: 5000 });
         await page.click('.dropdown-box .option-box .option-item:first-child');
 
         await page.click('.left-box input[placeholder="報告年度*"]');
@@ -100,7 +153,7 @@ async function automateESGSearch(company, year) {
         
         await page.fill('.left-box input[placeholder="報告年度*"]', year.toString());
         
-        await page.waitForSelector('.dropdown-box .option-box .option-item');
+        await page.waitForSelector('.dropdown-box .option-box .option-item', { timeout: 5000 });
         await page.click('.dropdown-box .option-box .option-item:first-child');
 
         await page.click('.left-box button.default');
@@ -114,7 +167,7 @@ async function automateESGSearch(company, year) {
         
         const download = await downloadPromise;
         
-        const fileName = `${company}-${year}.csv`;
+        const fileName = `${stockIdText}-${year}.csv`; // Filename uses stockIdText
         const downloadPath = path.join(process.cwd(), 'download', fileName);
         
         await download.saveAs(downloadPath);
@@ -122,10 +175,10 @@ async function automateESGSearch(company, year) {
         console.log(`檔案已成功下載並儲存至: ${downloadPath}`);
         
         console.log('開始處理碳排放資料...');
-        const carbonRows = await processCarbonData(downloadPath, company, year);
+        const carbonRows = await processCarbonData(downloadPath, companyQuery, companyId, stockIdText, stockNameText, year); // Pass stockIdText as company
         
         if (carbonRows.length > 0) {
-            await saveCarbonData(carbonRows, company);
+            await saveCarbonData(carbonRows, stockIdText); // Pass stockIdText as company
         } else {
             console.log('未找到範疇相關資料');
         }
@@ -142,18 +195,16 @@ async function automateESGSearch(company, year) {
 async function main() {
     const args = process.argv.slice(2);
     
-    if (args.length < 2) {
-        console.log('使用方式: node script.js <company> <year>');
-        console.log('範例: node script.js 2330 2023');
+    if (args.length < 2) { // companyQuery can be company name or code for ISIN search
+        console.log('使用方式: node grab.js <公司全名> <年度>');
+        console.log('範例 (使用公司名稱): node grab.js 台灣積體電路製造股份有限公司 2023');
         process.exit(1);
     }
     
-    const company = args[0];
+    const companyQuery = args[0]; // This will be used for ISIN search
     const year = args[1];
-    
-    console.log(`開始處理公司: ${company}, 年度: ${year}`);
-    
-    await automateESGSearch(company, year);
+    console.log(`開始處理查詢: ${companyQuery}, 年度: ${year}`);
+    await automateESGSearch(companyQuery, year);
 }
 
 main().catch(console.error);
