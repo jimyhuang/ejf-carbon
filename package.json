@@ -1,0 +1,16 @@
+{
+  "name": "ejf-taiwan-carbon",
+  "version": "1.0.0",
+  "description": "Automated extraction of carbon emission data from ESG reports of Taiwanese listed and OTC companies.",
+  "main": "collect.js",
+  "scripts": {
+    "start": "node collect.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "csv-parser": "^3.0.0",
+    "csv-writer": "^1.6.0",
+    "playwright": "^1.40.0"
+  }
+}
+

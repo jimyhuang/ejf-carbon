@@ -6,9 +6,9 @@ if [ ! -f "company.txt" ]; then
     exit 1
 fi
 
-# 檢查 grab.js 是否存在
-if [ ! -f "grab.js" ]; then
-    echo "錯誤: grab.js 檔案不存在"
+# 檢查 collect.js 是否存在
+if [ ! -f "collect.js" ]; then
+    echo "錯誤: collect.js 檔案不存在"
     exit 1
 fi
 
@@ -22,15 +22,15 @@ while IFS= read -r company_name || [[ -n "$company_name" ]]; do
     echo "處理公司: $company_name"
     
     # 執行 2023 年的命令
-    echo "執行: node grab.js \"$company_name\" 2023"
-    node grab.js "$company_name" 2023
+    echo "執行: node collect.js \"$company_name\" 2023"
+    node collect.js "$company_name" 2023
     if [ $? -ne 0 ]; then
         echo "警告: $company_name (2023) 執行失敗"
     fi
     
     # 執行 2024 年的命令
-    echo "執行: node grab.js \"$company_name\" 2024"
-    node grab.js "$company_name" 2024
+    echo "執行: node collect.js \"$company_name\" 2024"
+    node collect.js "$company_name" 2024
     if [ $? -ne 0 ]; then
         echo "警告: $company_name (2024) 執行失敗"
     fi
